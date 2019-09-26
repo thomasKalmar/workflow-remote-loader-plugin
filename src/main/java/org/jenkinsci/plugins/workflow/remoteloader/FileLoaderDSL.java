@@ -21,56 +21,112 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-package org.jenkinsci.plugins.workflow.remoteloader;
+package org.jenkinsci.plugins.workflow.remoteloader.FileLoaderDSL
 
-import hudson.Extension;
-import java.io.IOException;
-import java.io.InputStream;
-import org.apache.commons.io.IOUtils;
-import org.jenkinsci.plugins.scriptsecurity.sandbox.whitelists.ProxyWhitelist;
-import org.jenkinsci.plugins.scriptsecurity.sandbox.whitelists.StaticWhitelist;
-import org.kohsuke.accmod.Restricted;
-import org.kohsuke.accmod.restrictions.NoExternalUse;
+import org.jenkinsci.plugins.workflow.cps.CpsScript;
 
-/**
- * Provides a &quot;fileLoader&quot; global variable.
- * This variable allows to load Pipeline objects from remote locations (e.g. Git repositories).
- * @author Oleg Nenashev
- */
-@Extension
-public class FileLoaderDSL extends GroovyFileGlobalVariable {
+class FileLoaderDSLImpl implements Serializable {
+  
+  private CpsScript script
+  
+  private static final String DEFAULT_BRANCH = 'master'
+  //TODO: This repo does not exist. It needs something more realistic
+  private static final String DEFAULT_REPO_URL = 'git@github.com:jenkinsci/workflow-snippets.git'
+  private static final String TMP_FOLDER = 'libLoader'
+  
 
-    @Override 
-    public String getName() {
-        return "fileLoader";
+  public FileLoaderDSLImpl(CpsScript script) {
+    this.script = script
+  }
+
+  public Object fromGit(String libPath, String repoUrl = DEFAULT_REPO_URL, String repoBranch = DEFAULT_BRANCH, 
+    String credentialsId = null, labelExpression = '', boolean skipNode = false) {
+      Object res;
+      withGit(repoUrl, repoBranch, credentialsId, labelExpression, skipNode) {
+        res = load(libPath)
+      }
+      return res
+    }
+  
+  public <V> V withGit(String repoUrl = DEFAULT_REPO_URL, String repoBranch = DEFAULT_BRANCH, 
+        String credentialsId = null, labelExpression = '', boolean skipNode = false, Closure<V> body) {
+    node(labelExpression, skipNode) {
+      withTimestamper {
+        script.dir(TMP_FOLDER) {
+          // Flush the directory
+          script.deleteDir()
+
+          // Checkout
+          script.echo "Checking out ${repoUrl}, branch=${repoBranch}"
+          script.checkout changelog: false, poll: false, scm: [$class: 'GitSCM', branches: [[name: repoBranch]], 
+                          userRemoteConfigs: [[credentialsId: credentialsId, url: repoUrl]]]
+          
+          // Invoke body in the folder
+          body();
+
+          // Flush the directory again
+          script.deleteDir()
+        }
+      }
+    }
+  }
+
+  public Object fromSVN(String libPath, String repoUrl = DEFAULT_REPO_URL,  
+    String credentialsId = null, labelExpression = '', boolean skipNode = false) {
+      Object res;
+      withSVN(repoUrl, credentialsId, labelExpression, skipNode) {
+        res = load(libPath)
+      }
+      return res
+    }
+  
+  public <V> V withSVN(String repoUrl = DEFAULT_REPO_URL,  
+        String credentialsId = null, labelExpression = '', boolean skipNode = false, Closure<V> body) {
+    node(labelExpression, skipNode) {
+      withTimestamper {
+        script.dir(TMP_FOLDER) {
+          // Flush the directory
+          script.deleteDir()
+
+          // Checkout
+          script.echo "Checking out ${repoUrl}"
+          script.checkout changelog: false, poll: false, scm: [$class: 'SubversionSCM',  locations: [[credentialsId: credentialsId, local: '.', remote: repoUrl]], workspaceUpdater: [$class: 'UpdateUpdater']]
+          
+          // Invoke body in the folder
+          body();
+        }
+      }
+    }
+  }
+
+  
+  public Object load(String libPath) {
+    def effectiveLibPath = libPath.endsWith(".groovy") ? libPath : libPath + ".groovy";
+    script.echo "Loading from ${effectiveLibPath}"
+    def lib = script.load "${effectiveLibPath}"
+    //TODO:version checks, etc.
+    return lib;
+  }
+  
+  private <V> V node(String labelExpression = '', boolean skipNode, Closure<V> body) {
+        // TODO: don't require a new node if the current one fits labels
+        //if (script.env.HOME != null) {
+        //    // Already inside a node block.
+        //    body()
+        // } else 
+        if (skipNode){
+          body()
+        }else {
+          script.node(labelExpression) {
+            body()
+          }
+        }
     }
     
-    /**
-     * Loads a snippet from the resource file.
-     * @param name Name of the snippet (e.g. &quot;loadMultipleFiles&quot;)
-     * @return Workflow script text
-     * @throws IOException Loading error
-     */
-    @Restricted(NoExternalUse.class)
-    public static String getSampleSnippet(String name) throws IOException {
-        final String resourceName = "FileLoaderDSL/sample_" + name + ".groovy";
-        final InputStream scriptStream = FileLoaderDSL.class.getResourceAsStream(resourceName);
-        if (scriptStream == null) {
-            throw new IOException("Cannot find sample script in " + resourceName);
-        }
-        return IOUtils.toString(scriptStream, "UTF-8");
-    }
-    
-    @Extension
-    public static class MiscWhitelist extends ProxyWhitelist {
-
-        public MiscWhitelist() throws IOException {
-            super(new StaticWhitelist(
-                    "new java.util.TreeMap",
-                    "method groovy.lang.Closure call java.lang.Object",
-                    "method java.lang.Object toString",
-                    "method groovy.lang.GroovyObject invokeMethod java.lang.String java.lang.Object"
-            ));
-        }
-    }
+  private <V> V withTimestamper (Closure<V> body) {
+    // TODO: Make this thing optional if the plugin is installed
+    //wrap([$class: 'TimestamperBuildWrapper']) {
+      body()
+    //}
+  }
 }
